@@ -35,6 +35,21 @@ from utils.utils_image import calculate_psnr, augment_img
 
 
 # ---------------------------------------------------------------------------
+# Loss Function
+# ---------------------------------------------------------------------------
+class CharbonnierLoss(nn.Module):
+    """Charbonnier Loss (L1)"""
+    def __init__(self, eps=1e-3):
+        super(CharbonnierLoss, self).__init__()
+        self.eps = eps
+
+    def forward(self, x, y):
+        diff = x - y
+        # loss = torch.mean(torch.sqrt((diff * diff) + (self.eps*self.eps)))
+        return torch.mean(torch.sqrt(diff * diff + self.eps * self.eps))
+
+
+# ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
 class DenoisingDataset(Dataset):
@@ -259,7 +274,7 @@ def main():
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[Train] DRUNet parameters: {num_params:,}")
 
-    criterion = nn.L1Loss()  # L1 loss — more robust for semiconductor images
+    criterion = CharbonnierLoss(eps=1e-3)  # Advanced Charbonnier loss (better than L1)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-6
