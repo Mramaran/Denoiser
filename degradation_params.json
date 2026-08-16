@@ -1,0 +1,23 @@
+{
+  "scale_factor": 2,
+  "kernel_distribution": {
+    "bicubic": 0.57,
+    "bilinear": 0.41,
+    "gaussian_sub": 0.02
+  },
+  "order_distribution": {
+    "noise_after_downsampling": 1.0
+  },
+  "mean_gaussian_variance": 0.0019434214317410928,
+  "std_gaussian_variance": 0.0014032131643481553,
+  "mean_speckle_b": 0.005692870132357805,
+  "mean_speckle_c": 0.0012972355582044127,
+  "min_val_range": [
+    -0.04996126405894756,
+    0.026898835599422435
+  ],
+  "max_val_range": [
+    1.1033032417297364,
+    1.5945789515972137
+  ]
+}

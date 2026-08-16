@@ -32,21 +32,8 @@ from tqdm import tqdm
 
 from models.drunet import DRUNet
 from utils.utils_image import calculate_psnr, augment_img
-
-
-# ---------------------------------------------------------------------------
-# Loss Function
-# ---------------------------------------------------------------------------
-class CharbonnierLoss(nn.Module):
-    """Charbonnier Loss (L1)"""
-    def __init__(self, eps=1e-3):
-        super(CharbonnierLoss, self).__init__()
-        self.eps = eps
-
-    def forward(self, x, y):
-        diff = x - y
-        # loss = torch.mean(torch.sqrt((diff * diff) + (self.eps*self.eps)))
-        return torch.mean(torch.sqrt(diff * diff + self.eps * self.eps))
+from augment_pipeline import CalibratedDegradationDataset
+from models.losses import HybridLoss, CharbonnierLoss
 
 
 # ---------------------------------------------------------------------------
@@ -55,37 +42,45 @@ class CharbonnierLoss(nn.Module):
 class DenoisingDataset(Dataset):
     """Dataset for training the DRUNet denoiser.
 
-    Loads ground-truth images and adds synthetic Gaussian noise on-the-fly
-    with a random noise level sigma ~ U[sigma_min, sigma_max].
+    Loads ground-truth images and adds synthetic Gaussian noise on-the-fly.
     Random 128x128 crops and augmentations are applied for training.
+    For validation, deterministic center cropping, fixed noise level,
+    and deterministic seed are used.
     """
 
-    def __init__(self, gt_dir, patch_size=128, sigma_min=0.0, sigma_max=50.0 / 255.0,
-                 augment=True):
+    def __init__(self, gt_dir=None, file_list=None, patch_size=128, sigma_min=0.0, sigma_max=50.0 / 255.0,
+                 augment=True, is_val=False):
         """
         Args:
             gt_dir: path to directory containing GT .npy files
-            patch_size: size of random crops (default 128)
+            file_list: optional list of pre-split .npy file paths
+            patch_size: size of crops (default 128)
             sigma_min: minimum noise level (default 0)
             sigma_max: maximum noise level (default 50/255)
-            augment: whether to apply random flips/rotations
+            augment: whether to apply random flips/rotations (training only)
+            is_val: whether this is a validation dataset
         """
         super().__init__()
-        self.gt_dir = gt_dir
         self.patch_size = patch_size
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
-        self.augment = augment
+        self.augment = augment and not is_val
+        self.is_val = is_val
 
-        # Collect all .npy file paths
-        self.file_list = sorted([
-            os.path.join(gt_dir, f)
-            for f in os.listdir(gt_dir)
-            if f.endswith('.npy')
-        ])
+        if file_list is not None:
+            self.file_list = file_list
+        elif gt_dir is not None:
+            self.file_list = sorted([
+                os.path.join(gt_dir, f)
+                for f in os.listdir(gt_dir)
+                if f.endswith('.npy')
+            ])
+        else:
+            raise ValueError("Either gt_dir or file_list must be provided")
+
         if len(self.file_list) == 0:
-            raise RuntimeError(f"No .npy files found in {gt_dir}")
-        print(f"[Dataset] Found {len(self.file_list)} GT images in {gt_dir}")
+            raise RuntimeError("No .npy files found in dataset")
+        print(f"[Dataset] Found {len(self.file_list)} images. is_val={self.is_val}")
 
     def __len__(self):
         return len(self.file_list)
@@ -97,23 +92,38 @@ class DenoisingDataset(Dataset):
         H, W = gt.shape
         ps = self.patch_size
 
-        # Random crop
-        if H >= ps and W >= ps:
-            top = random.randint(0, H - ps)
-            left = random.randint(0, W - ps)
-            gt = gt[top:top + ps, left:left + ps]
+        if self.is_val:
+            # Deterministic center crop
+            if H >= ps and W >= ps:
+                top = (H - ps) // 2
+                left = (W - ps) // 2
+                gt = gt[top:top + ps, left:left + ps]
 
-        # Random augmentation (flip/rotate)
-        if self.augment:
-            mode = random.randint(0, 7)
-            gt = augment_img(gt, mode)
+            # Deterministic noise level (middle of the range)
+            sigma = (self.sigma_min + self.sigma_max) / 2.0
 
-        # Random noise level
-        sigma = random.uniform(self.sigma_min, self.sigma_max)
+            # Deterministic noise via fixed seed based on index
+            rng = np.random.default_rng(idx)
+            noise = rng.standard_normal(gt.shape, dtype=np.float32) * sigma
+            noisy = gt + noise
+        else:
+            # Random crop
+            if H >= ps and W >= ps:
+                top = random.randint(0, H - ps)
+                left = random.randint(0, W - ps)
+                gt = gt[top:top + ps, left:left + ps]
 
-        # Generate noisy image
-        noise = np.random.randn(*gt.shape).astype(np.float32) * sigma
-        noisy = gt + noise
+            # Random augmentation (flip/rotate)
+            if self.augment:
+                mode = random.randint(0, 7)
+                gt = augment_img(gt, mode)
+
+            # Random noise level
+            sigma = random.uniform(self.sigma_min, self.sigma_max)
+
+            # Generate noisy image
+            noise = np.random.randn(*gt.shape).astype(np.float32) * sigma
+            noisy = gt + noise
 
         # Convert to tensors: (1, H, W)
         gt_tensor = torch.from_numpy(gt).unsqueeze(0)
@@ -123,10 +133,7 @@ class DenoisingDataset(Dataset):
         return noisy_tensor, gt_tensor, sigma_tensor
 
 
-# ---------------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------------
-def train_one_epoch(model, dataloader, optimizer, criterion, device):
+def train_one_epoch(model, dataloader, optimizer, criterion, device, epoch=0, scaler=None):
     """Train for one epoch. Returns average loss."""
     model.train()
     total_loss = 0.0
@@ -137,17 +144,23 @@ def train_one_epoch(model, dataloader, optimizer, criterion, device):
         gt = gt.to(device)
         sigma = sigma.to(device)
 
-        # Forward pass: model takes (noisy_image, noise_level)
-        # sigma is per-sample, we pass mean for the batch
-        # Actually, DRUNet concatenates noise map inside forward()
-        # We need per-sample sigma, but for simplicity use batch approach
-        output = model(noisy, sigma)
-
-        loss = criterion(output, gt)
+        # Forward pass under mixed precision autocast
+        enable_amp = (scaler is not None) and (device.type == "cuda")
+        with torch.cuda.amp.autocast(enabled=enable_amp):
+            output = model(noisy, sigma)
+            if isinstance(criterion, HybridLoss):
+                loss = criterion(output, gt, epoch=epoch)
+            else:
+                loss = criterion(output, gt)
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item() * noisy.size(0)
         count += noisy.size(0)
@@ -196,8 +209,8 @@ def main():
                         help="Path to training data directory containing GT/ and NoisyLR/ subdirs")
     parser.add_argument("--epochs", type=int, default=200,
                         help="Number of training epochs (default: 200)")
-    parser.add_argument("--batch_size", type=int, default=16,
-                        help="Batch size (default: 16)")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Batch size (default: 32)")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Initial learning rate (default: 1e-4)")
     parser.add_argument("--patch_size", type=int, default=128,
@@ -208,8 +221,8 @@ def main():
                         help="Validation split ratio (default: 0.1)")
     parser.add_argument("--save_dir", type=str, default="model_weights",
                         help="Directory to save model weights (default: model_weights)")
-    parser.add_argument("--num_workers", type=int, default=0,
-                        help="DataLoader workers (default: 0)")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="DataLoader workers (default: 4)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume training from")
     args = parser.parse_args()
@@ -234,21 +247,38 @@ def main():
     # -----------------------------------------------------------------------
     # Dataset & DataLoader
     # -----------------------------------------------------------------------
-    full_dataset = DenoisingDataset(
+    # Collect files
+    file_list = sorted([
+        os.path.join(gt_dir, f)
+        for f in os.listdir(gt_dir)
+        if f.endswith('.npy')
+    ])
+    if len(file_list) == 0:
+        raise RuntimeError(f"No .npy files found in {gt_dir}")
+
+    # Deterministic split using a fixed seed
+    rng = random.Random(42)
+    rng.shuffle(file_list)
+
+    val_size = max(1, int(len(file_list) * args.val_split))
+    train_size = len(file_list) - val_size
+
+    val_files = file_list[:val_size]
+    train_files = file_list[val_size:]
+
+    train_dataset = CalibratedDegradationDataset(
         gt_dir=gt_dir,
+        params_path='degradation_params.json',
+        patch_size=args.patch_size,
+        is_train=True,
+        file_list=train_files
+    )
+    val_dataset = DenoisingDataset(
+        file_list=val_files,
         patch_size=args.patch_size,
         sigma_max=args.sigma_max,
-        augment=True
-    )
-
-    # Train/val split
-    total = len(full_dataset)
-    val_size = max(1, int(total * args.val_split))
-    train_size = total - val_size
-
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+        augment=False,
+        is_val=True
     )
 
     train_loader = DataLoader(
@@ -261,7 +291,7 @@ def main():
         num_workers=args.num_workers, pin_memory=(device.type == "cuda")
     )
 
-    print(f"[Train] Train: {train_size} | Val: {val_size}")
+    print(f"[Train] Train files: {train_size} | Val files: {val_size}")
     print(f"[Train] Batch size: {args.batch_size} | Patch size: {args.patch_size}")
 
     # -----------------------------------------------------------------------
@@ -274,7 +304,7 @@ def main():
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[Train] DRUNet parameters: {num_params:,}")
 
-    criterion = CharbonnierLoss(eps=1e-3)  # Advanced Charbonnier loss (better than L1)
+    criterion = HybridLoss(device=device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-6
@@ -293,6 +323,9 @@ def main():
     # -----------------------------------------------------------------------
     # Training
     # -----------------------------------------------------------------------
+    # GradScaler for Mixed Precision training
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+
     best_psnr = 0.0
     print(f"\n[Train] Starting training for {args.epochs} epochs...")
     print("=" * 70)
@@ -301,7 +334,7 @@ def main():
         t0 = time.time()
 
         # Train
-        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch=epoch, scaler=scaler)
 
         # Validate
         val_loss, val_psnr = validate(model, val_loader, criterion, device)
