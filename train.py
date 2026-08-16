@@ -223,6 +223,8 @@ def main():
                         help="Directory to save model weights (default: model_weights)")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="DataLoader workers (default: 4)")
+    parser.add_argument("--limit_images", type=int, default=None,
+                        help="Limit the dataset to the first N images for quick testing (default: None)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume training from")
     args = parser.parse_args()
@@ -255,6 +257,10 @@ def main():
     ])
     if len(file_list) == 0:
         raise RuntimeError(f"No .npy files found in {gt_dir}")
+
+    if args.limit_images is not None:
+        file_list = file_list[:args.limit_images]
+        print(f"[Train] Limiting dataset to first {args.limit_images} images.")
 
     # Deterministic split using a fixed seed
     rng = random.Random(42)
