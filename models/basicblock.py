@@ -47,4 +47,7 @@ def downsample_strideconv(in_channels, out_channels):
     return nn.Conv2d(in_channels, out_channels, stride=2, kernel_size=2, padding=0, bias=True)
 
 def upsample_convtranspose(in_channels, out_channels):
-    return nn.ConvTranspose2d(in_channels, out_channels, stride=2, kernel_size=2, padding=0, bias=True)
+    return nn.Sequential(
+        nn.Upsample(scale_factor=2, mode='nearest'),
+        nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=True)
+    )

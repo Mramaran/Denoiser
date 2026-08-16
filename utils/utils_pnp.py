@@ -81,8 +81,8 @@ def data_fidelity_sr(y, z_k, mu, scale_factor=2):
     with torch.enable_grad():
         x = z_k.clone().requires_grad_(True)
         
-        # Use Adam optimizer for quick convergence
-        optimizer = torch.optim.Adam([x], lr=0.05)
+        # Use SGD optimizer with a smaller learning rate (0.2) to prevent high-frequency gradient injection
+        optimizer = torch.optim.SGD([x], lr=0.2)
         
         # 10 iterations is usually enough for this convex quadratic subproblem
         for _ in range(10):
