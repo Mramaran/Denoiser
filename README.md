@@ -1,25 +1,44 @@
 # AI-Based Restoration of Degraded Semiconductor Inspection Images
 
 > **SEMICON India Hackathon 2026 — Track 1 (KLA)**
-> Physics-Aware Plug-and-Play (PnP-HQS) Image Restoration
+> End-to-end DRUNet-SR image restoration, with a Physics-Aware Plug-and-Play (PnP-HQS) path retained as an ablation baseline
 
 ## Overview
 
-This repository implements a **Physics-Aware Plug-and-Play (PnP)** image restoration pipeline that simultaneously handles:
+This repository restores degraded semiconductor inspection images, handling three degradations at once:
 
 1. **Gaussian noise** — additive sensor/electronic noise
 2. **Speckle noise** — multiplicative coherent-imaging noise
 3. **2× super-resolution** — restoring 128×128 → 256×256
 
-Unlike standard end-to-end deep learning approaches, we explicitly model the degradation physics and use a trained **DRUNet** denoiser only as a learned image prior within an iterative **Half-Quadratic Splitting (HQS)** optimization loop.
+**What ships:** `evaluate.py` defaults (`--mode e2e`) to an **end-to-end
+DRUNet-SR** model — a single trained network, with an optional PixelShuffle
+SR head, that maps the degraded 128×128 input directly to a restored 256×256
+output. It is trained directly on real (NoisyLR, GT) pairs and evaluated
+with an 8× geometric self-ensemble. This is the primary method, and the
+numbers in [Results](#results) below are measured on it.
+
+A second path, **Physics-Aware Plug-and-Play (PnP-HQS)** (`--mode pnp`), is
+retained in the repository as an ablation baseline. Instead of learning the
+degraded-to-clean mapping end-to-end, it explicitly models the degradation
+physics and uses the same DRUNet architecture — here trained as a denoiser
+rather than an SR network — as a learned image prior inside an iterative
+Half-Quadratic Splitting (HQS) optimization loop. See
+[Architecture](#architecture) and [PnP-HQS Algorithm](#pnp-hqs-algorithm)
+for how it works, and `Report/ablation.md` for its ablation results.
 
 ### Key Innovation
 
-No existing method combines Gaussian noise + speckle noise + super-resolution in a single PnP loop. Our **unified data-fidelity term** handles all three degradations in sequence via:
-- FFT-based closed-form SR update (following [DPIR](https://github.com/cszn/DPIR))
+No existing method combines Gaussian noise + speckle noise + super-resolution in a single PnP loop. The **unified data-fidelity term** in the PnP-HQS ablation path handles all three degradations in sequence via:
+- An iterative gradient-descent SR update, following the HQS scheme in [DPIR](https://github.com/cszn/DPIR)
 - Log-domain transform for speckle noise (converting multiplicative → additive)
 
 ## Architecture
+
+*The diagram and algorithm below describe the PnP-HQS ablation path
+(`--mode pnp`). The shipped default (`--mode e2e`) is a single forward pass
+through the DRUNet backbone with a PixelShuffle SR head — see
+[DRUNet Architecture](#drunet-architecture) and `utils/inference.py`.*
 
 ```
 Input: Degraded LR image (128×128)
@@ -28,19 +47,19 @@ Input: Degraded LR image (128×128)
 Bicubic Upsample → 256×256 (initialization)
     │
     ▼
-┌─── PnP-HQS Loop (K=15 iterations) ───┐
-│                                         │
-│   Step A: Data Fidelity (FFT)          │
-│   ├── Log-domain speckle transform     │
-│   ├── SR back-projection (frequency)   │
-│   └── Closed-form solution             │
-│                                         │
-│   Step B: DRUNet Denoiser Prior        │
-│   ├── U-Net with residual blocks       │
-│   ├── Noise level map input (σ_k)      │
-│   └── σ decays geometrically per iter  │
-│                                         │
-└─────────────────────────────────────────┘
+┌── PnP-HQS Loop (K=15 iterations) ──────────────────────┐
+│                                                        │
+│   Step A: Data Fidelity (iterative, stable step size)  │
+│   ├── Log-domain speckle transform                     │
+│   ├── SR back-projection (gradient descent)            │
+│   └── 30-step GD solve, step size 1/L                  │
+│                                                        │
+│   Step B: DRUNet Denoiser Prior                        │
+│   ├── U-Net with residual blocks                       │
+│   ├── Noise level map input (σ_k)                      │
+│   └── σ decays geometrically per iter                  │
+│                                                        │
+└────────────────────────────────────────────────────────┘
     │
     ▼
 Output: Restored image (256×256)
@@ -57,63 +76,157 @@ Output: Restored image (256×256)
 | Downsampling | Strided convolution (stride 2) |
 | Upsampling | Transposed convolution (stride 2) |
 | Skip connections | Concatenation + 1×1 conv |
-| Parameters | ~5M |
+| Parameters | 33,707,652 (33.7M) |
+| Checkpoint (fp16, inference) | ~67 MB |
 
 ## Repository Structure
 
 ```
-├── README.md                  # This file
-├── requirements.txt           # Python dependencies
-├── train.py                   # DRUNet denoiser training script
-├── evaluate.py                # Inference script (KLA CLI interface)
-├── compute_metrics.py         # PSNR/SSIM evaluation
+├── README.md                     # This file
+├── requirements.txt              # Python dependencies
+├── train.py                      # End-to-end training
+├── evaluate.py                   # Inference (KLA CLI: --input_dir / --output_dir)
+├── compute_metrics.py            # PSNR / SSIM / LPIPS scoring
+├── datasets.py                   # Real (NoisyLR, GT) pair dataset
+├── augment_pipeline.py           # Calibrated synthetic degradation
+├── estimate_parameters.py        # Reverse-engineers the degradation from real pairs
+├── degradation_params.json       # Calibration output
+├── make_eval_split.py            # Freezes the held-out split
+├── eval_split.txt                # 320 held-out filenames
 ├── models/
-│   ├── __init__.py
-│   ├── basicblock.py          # ResBlock, conv, up/downsample blocks
-│   └── drunet.py              # DRUNet architecture
+│   ├── basicblock.py             # ResBlock (LayerNorm + GELU), up/downsample
+│   ├── drunet.py                 # DRUNet, optional PixelShuffle SR head
+│   └── losses.py                 # Charbonnier + FFT + SSIM + Sobel + LPIPS
 ├── utils/
-│   ├── __init__.py
-│   ├── utils_image.py         # Image I/O, PSNR, SSIM, augmentation
-│   └── utils_pnp.py           # PnP-HQS loop, FFT data fidelity
+│   ├── utils_image.py            # I/O, PSNR, windowed SSIM, augmentation
+│   ├── utils_pnp.py              # PnP-HQS loop (ablation path)
+│   └── inference.py              # End-to-end inference + self-ensemble
+├── tests/                        # pytest suite (48 tests)
 ├── model_weights/
-│   └── drunet_denoiser_best.pth  # Trained model weights
-└── restored_outputs/          # Test set restoration results
+│   └── drunet_sr_inference.pth   # Shipped weights: fp16 EMA, 67.5 MB
+├── restored_outputs/             # Restored test-set outputs (400 images)
+└── Report/
+    └── ablation.md               # Held-out results + known limitations
 ```
+
+### Model weights
+
+`evaluate.py` loads `model_weights/drunet_sr_inference.pth` automatically — the
+fp16 exponential-moving-average weights, 67.5 MB. No arguments needed.
+
+Training also writes `drunet_sr_best.pth`, a 539.7 MB resumable checkpoint
+carrying the live model, the EMA copy and the Adam moments. It is gitignored
+because it exceeds GitHub's 100 MB per-file limit; it is only needed for
+`--resume` and is not required for inference. Round-tripping the weights through
+fp16 costs 94 dB PSNR against the fp32 originals, which is roughly 64 dB below
+the signal the model is scored on, so the reduction is lossless in practice.
 
 ## Quick Start
 
-### 1. Install Dependencies
+### 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> **Note:** PyTorch ≥ 2.0 is required. Install with CUDA support for GPU acceleration:
-> ```bash
-> pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-> ```
+Verified from scratch in a clean virtualenv: the pinned set installs and runs
+inference on all 400 test images with no manual steps.
 
-### 2. Train the Denoiser
+`torch` is pinned without a CUDA local-version tag so the install stays
+portable, which means PyPI serves the **CPU** wheel by default. Inference is
+correct either way — `evaluate.py` selects CUDA when it is available and falls
+back to CPU otherwise — but for GPU speed install the CUDA build first:
 
 ```bash
-python train.py --data_dir <path_to_train_dir> --epochs 200 --batch_size 16
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu126
+pip install -r requirements.txt
 ```
 
-The training directory should contain a `GT/` subdirectory with ground-truth `.npy` images.
+CPU and CUDA outputs were compared directly and agree to `1.6e-04` max absolute
+difference, which is ordinary backend nondeterminism. Measured cost for the full
+400-image test set, including the 8× self-ensemble:
 
-### 3. Run Inference
+| Backend | Per image | 400 images |
+|---|---|---|
+| CUDA (RTX 4060 Laptop) | 0.21 s | 1.4 min |
+| CPU | 4.03 s | 26.8 min |
+
+### 2. Run inference (this is what KLA's benchmark runs)
 
 ```bash
 python evaluate.py --input_dir <path_to_test_npy> --output_dir ./restored_outputs
 ```
 
-This loads the best trained model from `model_weights/` and restores all input images.
+Defaults to the end-to-end model with 8× geometric self-ensemble. Add
+`--mode pnp` to run the iterative Plug-and-Play path instead.
 
-### 4. Evaluate Metrics (if GT available)
+### 3. Reproduce training
 
 ```bash
-python compute_metrics.py --restored_dir ./restored_outputs --gt_dir <path_to_GT>
+python make_eval_split.py --gt_dir <path_to_GT>
+python train.py --data_dir <path_to_train_dir> --epochs 150 --batch_size 16
 ```
+
+The training directory must contain `GT/` and `NoisyLR/` subdirectories.
+
+### 4. Score against ground truth
+
+```bash
+python compute_metrics.py --restored_dir ./restored_val --gt_dir <path_to_GT> \
+    --file_list eval_split.txt --baseline_dir <path_to_NoisyLR> --lpips
+```
+
+### 5. Run the test suite
+
+```bash
+python -m pytest tests/ -v
+```
+
+## Results
+
+Held out on **320 images** (`eval_split.txt` — a seeded 10% shuffle of the
+3200 real training pairs, never seen during training; see `Report/ablation.md`
+for the full ablation table, including the PnP-HQS ablation row and error
+budget):
+
+| Configuration | PSNR (dB) | SSIM | LPIPS ↓ |
+|---|---|---|---|
+| Bicubic upsample of NoisyLR (control) | 22.780 | 0.5202 | 0.4645 |
+| End-to-end DRUNet-SR, single pass | 23.884 | 0.5537 | 0.3405 |
+| **End-to-end DRUNet-SR + 8× self-ensemble (shipped default)** | **26.706** | **0.7133** | **0.3019** |
+
+**+3.926 dB PSNR over the bicubic control.** This is what
+`python evaluate.py --input_dir <X> --output_dir <Y>` produces with no extra
+flags — see step 2 of Quick Start.
+
+Reproduce on the held-out split with:
+
+```bash
+python evaluate.py --input_dir ../Dataset/train/train/NoisyLR --output_dir ./restored_val
+python compute_metrics.py --restored_dir ./restored_val --gt_dir ../Dataset/train/train/GT \
+    --file_list eval_split.txt --baseline_dir ../Dataset/train/train/NoisyLR --lpips
+```
+
+### Training & inference cost
+
+| | |
+|---|---|
+| Hardware | RTX 4060 Laptop, 8.6 GB, bf16 autocast |
+| Training | 150 epochs, ~71 s/epoch, ~3.0 h total |
+| Best checkpoint | **epoch 28** (selected by held-out PSNR) |
+| Inference | 0.234 s/image with 8× self-ensemble |
+| Test set | 400 images, 128×128 in → 256×256 out |
+
+## Known limitations
+
+The composite training loss is mis-scaled: its FFT (frequency-domain) term
+takes **66.6%** of the weighted gradient signal, against **8.8%** for the
+Charbonnier pixel term that actually drives PSNR. As a direct result, the
+model peaked at **epoch 28** of 150 and declined afterward, so the shipped
+checkpoint is that epoch-28 EMA rather than the final one. Correcting the
+loss scaling and retraining is the single highest-value next step; see
+`Report/ablation.md` for the full per-term breakdown and a
+verified-but-deliberately-unapplied fix.
 
 ## Technical Details
 
@@ -133,9 +246,10 @@ y = D( η ⊙ (x + n_gaussian) )
 
 For `k = 0, 1, ..., K-1`:
 
-**Step A** (Data Fidelity — closed-form FFT):
+**Step A** (Data Fidelity — iterative, stable step size):
 ```
-x_{k+1} = F^{-1}( (μ_k · F(z_k) + F(D^T y)) / (μ_k + F(D^T D)) )
+x_{k+1} = argmin_x  ||y - Dx||^2 / (2 mu_k)  +  ||x - z_k||^2 / 2
+          solved by gradient descent with step 1/L, L = ||D||^2/mu_k + 1
 ```
 
 **Step B** (Denoiser Prior):
@@ -164,8 +278,8 @@ This allows the standard DPIR data-fidelity update to handle speckle noise.
 
 ## Hardware
 
-- **Training:** GPU recommended (2-4 hours on single GPU, ~8 hours on CPU)
-- **Inference:** ~0.5s per image on GPU, ~3s on CPU
+- **Training:** RTX 4060 Laptop (8.6 GB), bf16 autocast — 150 epochs in ~3.0 h. See [Results](#results) for the full breakdown.
+- **Inference:** 0.234 s/image on GPU with the default 8× self-ensemble.
 
 ## License
 

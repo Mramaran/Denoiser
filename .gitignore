@@ -1,2 +1,6 @@
 git_commands.md
 WHAT_TO_DO.md
+
+model_weights/drunet_sr_best.pth
+model_weights/drunet_epoch_*.pth
+.pytest_cache/

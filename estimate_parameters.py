@@ -1,4 +1,5 @@
 import os
+import argparse
 import numpy as np
 import scipy.ndimage as ndimage
 import scipy.signal as signal
@@ -113,20 +114,23 @@ def infer_order(residual, scale=2):
         return 'noise_after_downsampling'
 
 def main():
-    # Try relative paths first (Colab/workspace standard), then fall back to absolute paths
-    gt_dir = "train/train/GT"
-    noisy_dir = "train/train/NoisyLR"
-    
-    if not os.path.exists(gt_dir) or not os.path.exists(noisy_dir):
-        gt_dir = r"C:\Users\Ashwin\Documents\Github\Semicon_Hack\train\train\GT"
-        noisy_dir = r"C:\Users\Ashwin\Documents\Github\Semicon_Hack\train\train\NoisyLR"
-        
-    if not os.path.exists(gt_dir) or not os.path.exists(noisy_dir):
-        print(f"Dataset paths not found. Tried relative and absolute paths.")
-        print(f"Please make sure your working directory is set to Semicon_Hack.")
-        return
-        
-    filenames = sorted(os.listdir(gt_dir))[:100]  # sample 100 images for estimation
+    parser = argparse.ArgumentParser(
+        description="Estimate the degradation parameters from real (GT, NoisyLR) pairs"
+    )
+    parser.add_argument("--gt_dir", default="../Dataset/train/train/GT")
+    parser.add_argument("--noisy_dir", default="../Dataset/train/train/NoisyLR")
+    parser.add_argument("--num_samples", type=int, default=100,
+                        help="How many pairs to estimate from (default: 100)")
+    parser.add_argument("--out", default="degradation_params.json")
+    args = parser.parse_args()
+
+    gt_dir, noisy_dir = args.gt_dir, args.noisy_dir
+    for d in (gt_dir, noisy_dir):
+        if not os.path.exists(d):
+            print(f"Dataset path not found: {d}")
+            return
+
+    filenames = sorted(os.listdir(gt_dir))[:args.num_samples]
     
     kernels = []
     gauss_vars = []
@@ -190,9 +194,9 @@ def main():
     print("\n--- Estimated Parameters ---")
     print(json.dumps(params, indent=2))
     
-    with open('degradation_params.json', 'w') as f:
+    with open(args.out, 'w') as f:
         json.dump(params, f, indent=2)
-    print("\nSaved parameters to degradation_params.json")
+    print(f"\nSaved parameters to {args.out}")
 
 if __name__ == '__main__':
     main()
