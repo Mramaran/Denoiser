@@ -70,66 +70,64 @@ class CalibratedDegradationDataset(Dataset):
     def __getitem__(self, idx):
         gt_path = os.path.join(self.gt_dir, self.filenames[idx])
         x = np.load(gt_path).astype(np.float32)
-        
-        # Random crop during training
-        if self.is_train and x.shape[0] > self.patch_size * 2:
-            h, w = x.shape
-            th, tw = self.patch_size * 2, self.patch_size * 2
-            i = np.random.randint(0, h - th + 1)
-            j = np.random.randint(0, w - tw + 1)
-            x = x[i:i+th, j:j+tw]
+        scale = self.params['scale_factor']
 
-        # Sample degradation parameters
+        # patch_size is the LR patch size, so the GT crop is scale x larger.
+        # Cropping is unconditional on is_train: training draws a random
+        # offset, eval takes a deterministic centre crop (mirroring
+        # PairedRealDataset), so both paths yield the same output shape and
+        # stay ConcatDataset-compatible.
+        if x.shape[0] >= self.patch_size * scale:
+            h, w = x.shape
+            th = tw = self.patch_size * scale
+            if self.is_train:
+                i = np.random.randint(0, h - th + 1)
+                j = np.random.randint(0, w - tw + 1)
+            else:
+                i, j = (h - th) // 2, (w - tw) // 2
+            x = x[i:i + th, j:j + tw]
+
         kernels = list(self.params['kernel_distribution'].keys())
         kernel_probs = list(self.params['kernel_distribution'].values())
         kernel = np.random.choice(kernels, p=kernel_probs)
-        
+
         orders = list(self.params['order_distribution'].keys())
         order_probs = list(self.params['order_distribution'].values())
         order = np.random.choice(orders, p=order_probs)
-        
-        gauss_var = max(1e-6, np.random.normal(self.params['mean_gaussian_variance'], self.params['std_gaussian_variance']))
+
+        gauss_var = max(1e-6, np.random.normal(self.params['mean_gaussian_variance'],
+                                               self.params['std_gaussian_variance']))
         speckle_b = max(0, self.params['mean_speckle_b'])
         speckle_c = max(0, self.params['mean_speckle_c'])
-        
-        # Apply degradation chain
-        scale = self.params['scale_factor']
+
         if order == 'noise_before_downsampling':
-            # 1. Add noise at high-resolution
             x_noisy_hr = self.apply_noise(x, gauss_var, speckle_b, speckle_c)
-            # 2. Downsample
             y = self.apply_downsample(x_noisy_hr, kernel, scale=scale)
         else:
-            # 1. Downsample first
             x_lr = self.apply_downsample(x, kernel, scale=scale)
-            # 2. Add noise at low-resolution
             y = self.apply_noise(x_lr, gauss_var, speckle_b, speckle_c)
-            
-        # Target range / clipping adjustment
-        min_clip = np.random.uniform(self.params['min_val_range'][0], self.params['min_val_range'][1])
-        max_clip = np.random.uniform(self.params['max_val_range'][0], self.params['max_val_range'][1])
-        y = np.clip(y, min_clip, max_clip)
-        
-        # Compute reference clean downsampled target
-        x_lr_ref = self.apply_downsample(x, 'bicubic', scale=scale)
 
-        # Compute average noise standard deviation (sigma)
-        noise_var = gauss_var + speckle_b * x_lr_ref + speckle_c * (x_lr_ref ** 2)
-        sigma = np.sqrt(np.mean(noise_var))
+        min_clip = np.random.uniform(self.params['min_val_range'][0],
+                                     self.params['min_val_range'][1])
+        max_clip = np.random.uniform(self.params['max_val_range'][0],
+                                     self.params['max_val_range'][1])
+        y = np.clip(y, min_clip, max_clip).astype(np.float32)
 
-        return torch.from_numpy(y).unsqueeze(0).float(), torch.from_numpy(x_lr_ref).unsqueeze(0).float(), torch.tensor(sigma, dtype=torch.float32)
+        # Target is the full-resolution GT crop: this dataset now trains the
+        # end-to-end LR -> HR mapping, matching PairedRealDataset.
+        return (torch.from_numpy(np.ascontiguousarray(y)).unsqueeze(0).float(),
+                torch.from_numpy(np.ascontiguousarray(x)).unsqueeze(0).float())
 
 if __name__ == '__main__':
-    # Simple test run if executed directly
     print("Testing CalibratedDegradationDataset...")
     dummy_gt = np.random.rand(256, 256).astype(np.float32)
     os.makedirs('dummy_train/GT', exist_ok=True)
     np.save('dummy_train/GT/000000.npy', dummy_gt)
-    
+
     dataset = CalibratedDegradationDataset(gt_dir='dummy_train/GT', patch_size=64)
-    y, x_lr, sigma = dataset[0]
-    print(f"y shape: {y.shape}, x_lr shape: {x_lr.shape}, sigma: {sigma.item():.4f}")
+    y, x = dataset[0]
+    print(f"y shape: {y.shape}, x shape: {x.shape}")
     print(f"y min: {y.min().item():.4f}, y max: {y.max().item():.4f}")
-    
+
     import shutil
     shutil.rmtree('dummy_train')
