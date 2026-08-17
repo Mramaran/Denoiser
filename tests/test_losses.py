@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from models.losses import CharbonnierLoss, FrequencyLoss, GradientLoss
-from models.losses import _warmup_factor
+from models.losses import LOSS_PRESETS, _warmup_factor
 
 
 def test_gradient_loss_is_zero_for_identical_images():
@@ -38,6 +38,43 @@ def test_charbonnier_is_zero_for_identical_images():
 def test_frequency_loss_is_zero_for_identical_images():
     x = torch.rand(2, 1, 16, 16)
     assert FrequencyLoss()(x, x).item() == pytest.approx(0.0, abs=1e-5)
+
+
+# --- FFT normalisation --------------------------------------------------
+#
+# Report/ablation.md attributes the mis-scaled objective to norm="backward"
+# applying no normalisation while "ortho" divides by sqrt(H*W). These tests
+# pin that factor down so the claim is executable rather than prose. They
+# deliberately avoid constructing HybridLoss, which downloads AlexNet weights.
+
+def test_frequency_loss_backward_is_sqrt_n_times_ortho():
+    """L1 is homogeneous, so scaling every FFT magnitude by sqrt(H*W) scales
+    the loss by exactly that factor. At 32x32 the ratio is 32."""
+    torch.manual_seed(0)
+    pred, target = torch.rand(2, 1, 32, 32), torch.rand(2, 1, 32, 32)
+
+    ortho = FrequencyLoss(norm="ortho")(pred, target).item()
+    backward = FrequencyLoss(norm="backward")(pred, target).item()
+
+    assert backward / ortho == pytest.approx(32.0, rel=1e-4)
+
+
+def test_frequency_loss_defaults_to_ortho():
+    assert FrequencyLoss().norm == "ortho"
+
+
+def test_frequency_loss_rejects_an_unknown_norm():
+    with pytest.raises(ValueError, match="ortho"):
+        FrequencyLoss(norm="forward")
+
+
+def test_loss_presets_match_the_documented_weights():
+    """Report/ablation.md quotes both weight sets by value. If someone edits
+    one without the other, the report stops describing the code."""
+    assert LOSS_PRESETS["ortho"] == dict(
+        w_pixel=1.0, w_freq=0.15, w_ssim=0.05, w_grad=0.02, w_lpips=0.01)
+    assert LOSS_PRESETS["backward"] == dict(
+        w_pixel=1.0, w_freq=0.05, w_ssim=0.20, w_grad=0.10, w_lpips=0.05)
 
 
 # --- _warmup_factor -----------------------------------------------------

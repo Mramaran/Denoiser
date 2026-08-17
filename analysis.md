@@ -89,7 +89,7 @@ class FrequencyLoss(nn.Module):
         return F.l1_loss(torch.abs(pred_fft), torch.abs(target_fft))
 
 class HybridLoss(nn.Module):
-    def __init__(self, device='cuda', w_pixel=1.0, w_ssim=0.2, w_lpips=0.1, w_freq=0.05):
+    def __init__(self, device='cuda', w_pixel=1.0, w_ssim=0.2, w_lpips=0.05, w_freq=0.05, w_grad=0.1):
         super().__init__()
         self.pixel_loss = CharbonnierLoss()
         self.freq_loss = FrequencyLoss()
@@ -99,8 +99,9 @@ class HybridLoss(nn.Module):
         self.w_ssim = w_ssim
         self.w_lpips = w_lpips
         self.w_freq = w_freq
+        self.w_grad = w_grad
         
-    def forward(self, pred, target, epoch=0, warm_up_epochs=10):
+    def forward(self, pred, target, epoch=None, warm_up_epochs=10):
         # Pixel loss (Charbonnier)
         loss_pix = self.pixel_loss(pred, target)
         

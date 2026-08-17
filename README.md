@@ -69,12 +69,12 @@ Output: Restored image (256×256)
 
 | Component | Details |
 |---|---|
-| Input | 2 channels (image + noise level map) |
+| Input | 1 channel (shipped e2e model). The PnP denoiser variant takes 2: image + noise level map |
 | Output | 1 channel (grayscale) |
 | Encoder | 3 levels: 64 → 128 → 256 → 512 channels |
-| Blocks | 4 ResBlocks per level (32 total) |
-| Downsampling | Strided convolution (stride 2) |
-| Upsampling | Transposed convolution (stride 2) |
+| Blocks | 4 ResBlocks per stage, 7 stages, 28 total |
+| Downsampling | Strided convolution (2×2, stride 2) |
+| Upsampling | Nearest-neighbour ×2 followed by a 3×3 convolution. The helper is named `upsample_convtranspose` for historical reasons but builds no transposed convolution; the model contains none |
 | Skip connections | Concatenation + 1×1 conv |
 | Parameters | 33,707,652 (33.7M) |
 | Checkpoint (fp16, inference) | ~67 MB |
@@ -82,10 +82,11 @@ Output: Restored image (256×256)
 ## Repository Structure
 
 ```
+├── run.py                        # SUBMISSION ENTRY POINT: python run.py <in> <out>
 ├── README.md                     # This file
-├── requirements.txt              # Python dependencies
+├── requirements.txt              # Python dependencies, all version-pinned
 ├── train.py                      # End-to-end training
-├── evaluate.py                   # Inference (KLA CLI: --input_dir / --output_dir)
+├── evaluate.py                   # Older flag-based CLI, same outputs as run.py
 ├── compute_metrics.py            # PSNR / SSIM / LPIPS scoring
 ├── datasets.py                   # Real (NoisyLR, GT) pair dataset
 ├── augment_pipeline.py           # Calibrated synthetic degradation
@@ -93,7 +94,10 @@ Output: Restored image (256×256)
 ├── degradation_params.json       # Calibration output
 ├── make_eval_split.py            # Freezes the held-out split
 ├── eval_split.txt                # 320 held-out filenames
+├── analysis.md                   # Working notes on the degradation analysis
+├── Colab_Training_Runner.ipynb   # Notebook that reproduces training on Colab
 ├── models/
+│   ├── drunet_sr_inference.pth   # Shipped weights: fp16 EMA, 67.5 MB
 │   ├── basicblock.py             # ResBlock (LayerNorm + GELU), up/downsample
 │   ├── drunet.py                 # DRUNet, optional PixelShuffle SR head
 │   └── losses.py                 # Charbonnier + FFT + SSIM + Sobel + LPIPS
@@ -101,25 +105,50 @@ Output: Restored image (256×256)
 │   ├── utils_image.py            # I/O, PSNR, windowed SSIM, augmentation
 │   ├── utils_pnp.py              # PnP-HQS loop (ablation path)
 │   └── inference.py              # End-to-end inference + self-ensemble
-├── tests/                        # pytest suite (48 tests)
-├── model_weights/
-│   └── drunet_sr_inference.pth   # Shipped weights: fp16 EMA, 67.5 MB
+├── tests/                        # pytest suite
 ├── restored_outputs/             # Restored test-set outputs (400 images)
 └── Report/
-    └── ablation.md               # Held-out results + known limitations
+    ├── ablation.md               # Held-out results + known limitations
+    ├── make_comparison_report.py # Builds restoration_comparison.pdf
+    ├── restoration_comparison.pdf# 101-page GT / input / bicubic / restored panels
+    ├── report.py                 # Builds denoising_comparison.pdf
+    ├── denoising_comparison.pdf  # Earlier denoising-only comparison
+    ├── GT/                       # 101 ground-truth samples used by the reports
+    ├── NoisyLR/                  # matching 101 degraded inputs
+    └── restored_training_outputs/# matching 101 restored outputs
 ```
 
 ### Model weights
 
-`evaluate.py` loads `model_weights/drunet_sr_inference.pth` automatically — the
-fp16 exponential-moving-average weights, 67.5 MB. No arguments needed.
+`run.py` and `evaluate.py` both load `models/drunet_sr_inference.pth`
+automatically — the fp16 exponential-moving-average weights, 67.5 MB. No
+arguments needed.
 
-Training also writes `drunet_sr_best.pth`, a 539.7 MB resumable checkpoint
-carrying the live model, the EMA copy and the Adam moments. It is gitignored
-because it exceeds GitHub's 100 MB per-file limit; it is only needed for
-`--resume` and is not required for inference. Round-tripping the weights through
-fp16 costs 94 dB PSNR against the fp32 originals, which is roughly 64 dB below
-the signal the model is scored on, so the reduction is lossless in practice.
+The weights sit in `models/` alongside the architecture code, matching the
+folder layout the submission brief specifies. Both scripts fall back to
+`model_weights/` if a clone still uses the older layout, so neither needs an
+edit either way. `train.py --save_dir` also defaults to `models/`.
+
+Round-tripping the weights through fp16 costs 94 dB PSNR against the fp32
+originals, which is roughly 64 dB below the signal the model is scored on, so
+the reduction is lossless in practice.
+
+### Optional: the resumable training checkpoint
+
+**Nothing needs to be downloaded to run this repository.** Inference uses the
+67.5 MB checkpoint already committed at `models/drunet_sr_inference.pth`.
+
+Training also writes `drunet_sr_best.pth`, a 539.7 MB checkpoint carrying the
+live model, the EMA copy and both Adam moments. It exceeds GitHub's 100 MB
+per-file limit, so it is gitignored and hosted externally instead:
+
+> https://drive.google.com/drive/folders/1TuBgy8EQDuTciaLWzz8kP7zx2mfRHCQG?usp=sharing
+
+That file is needed **only** for `python train.py --resume`, to continue an
+interrupted training run. It is not used by `run.py`, by `evaluate.py`, or by
+the test suite. If you only want to reproduce our results, ignore it entirely.
+
+To use it, place it at `models/drunet_sr_best.pth`.
 
 ## Quick Start
 
@@ -148,17 +177,42 @@ difference, which is ordinary backend nondeterminism. Measured cost for the full
 
 | Backend | Per image | 400 images |
 |---|---|---|
-| CUDA (RTX 4060 Laptop) | 0.21 s | 1.4 min |
-| CPU | 4.03 s | 26.8 min |
+| CUDA (RTX 4060 Laptop) | 0.163 s | 1.1 min (measured) |
+| CPU | 3.99 s | 26.6 min (extrapolated from 10) |
+
+The 8 self-ensemble variants share a single forward pass rather than running as
+8 batch-1 passes. Isolated on 24 images that is 0.2053 → 0.1386 s/img, a 1.48×
+speedup for 0.52 GB peak memory. It is a GPU-side win only: the CPU path is
+compute-bound and unchanged (4.03 → 3.99 s/img, within noise).
+
+`torch.backends.cudnn.benchmark` is deliberately **not** enabled. Measured, it
+returns ~2% while raising peak memory from 0.52 GB to 5.33 GB — a poor trade on
+an 8.6 GB card, and it yields nothing once the variants are batched.
 
 ### 2. Run inference (this is what KLA's benchmark runs)
 
 ```bash
-python evaluate.py --input_dir <path_to_test_npy> --output_dir ./restored_outputs
+python run.py <input-dir> <output-dir>
 ```
 
-Defaults to the end-to-end model with 8× geometric self-ensemble. Add
-`--mode pnp` to run the iterative Plug-and-Play path instead.
+`run.py` is the submission entry point and takes two positional arguments. It
+reads every `.npy` in the input directory, creates the output directory if it
+does not exist (including nested paths), and writes one restored `.npy` per
+input under the same filename.
+
+Each output is guaranteed to be grayscale `(H, W)`, `float32`, finite, inside
+`[0, 1]`, and exactly 2× the input resolution. `run.py` verifies each of these
+before writing and exits non-zero if any file or count is missing.
+
+No internet access, API key, download, or manual configuration is required.
+The weights ship in this repository, and the inference import chain never
+touches `lpips`, which is a training-only dependency imported solely by
+`models/losses.py`. Verified: importing the inference path pulls in no
+network-capable module.
+
+`evaluate.py` remains available for local experiments and takes the older
+`--input_dir` / `--output_dir` flags plus `--mode pnp` for the Plug-and-Play
+ablation path. Both scripts produce identical output.
 
 ### 3. Reproduce training
 
@@ -181,6 +235,10 @@ python compute_metrics.py --restored_dir ./restored_val --gt_dir <path_to_GT> \
 ```bash
 python -m pytest tests/ -v
 ```
+
+69 tests, ~100 s. No GPU or network required — the suite uses a bicubic test
+double rather than the trained weights, and avoids constructing `HybridLoss`,
+which would download AlexNet weights for its LPIPS term.
 
 ## Results
 
@@ -214,7 +272,7 @@ python compute_metrics.py --restored_dir ./restored_val --gt_dir ../Dataset/trai
 | Hardware | RTX 4060 Laptop, 8.6 GB, bf16 autocast |
 | Training | 150 epochs, ~71 s/epoch, ~3.0 h total |
 | Best checkpoint | **epoch 28** (selected by held-out PSNR) |
-| Inference | 0.234 s/image with 8× self-ensemble |
+| Inference | 0.163 s/image with 8× self-ensemble (batched) |
 | Test set | 400 images, 128×128 in → 256×256 out |
 
 ## Known limitations
@@ -279,7 +337,7 @@ This allows the standard DPIR data-fidelity update to handle speckle noise.
 ## Hardware
 
 - **Training:** RTX 4060 Laptop (8.6 GB), bf16 autocast — 150 epochs in ~3.0 h. See [Results](#results) for the full breakdown.
-- **Inference:** 0.234 s/image on GPU with the default 8× self-ensemble.
+- **Inference:** 0.163 s/image on GPU with the default 8× self-ensemble.
 
 ## License
 

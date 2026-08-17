@@ -128,9 +128,17 @@ def main():
     parser.add_argument("--lr_patch", type=int, default=64,
                         help="LR crop size; the GT crop is 2x this (default: 64)")
     parser.add_argument("--loss", choices=["hybrid", "charbonnier"], default="hybrid")
+    parser.add_argument("--loss_norm", choices=["ortho", "backward"], default="ortho",
+                        help="FFT normalisation and matching weight preset for the "
+                             "hybrid loss. 'ortho' (default) is the corrected, "
+                             "pixel-dominant objective. 'backward' reproduces the "
+                             "original frequency-dominated objective that produced "
+                             "the shipped epoch-28 checkpoint. See Report/ablation.md.")
     parser.add_argument("--no_synthetic", action="store_true",
                         help="Train on real pairs only, skipping the calibrated augmenter")
-    parser.add_argument("--save_dir", type=str, default="model_weights")
+    parser.add_argument("--save_dir", type=str, default="models",
+                        help="Where checkpoints are written. Defaults to models/, "
+                             "which is where run.py and evaluate.py look first.")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--ema_decay", type=float, default=0.999)
     parser.add_argument("--resume", type=str, default=None)
@@ -180,7 +188,11 @@ def main():
     print(f"[Train] Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     if args.loss == "hybrid":
-        criterion = HybridLoss(device=device)
+        criterion = HybridLoss(device=device, freq_norm=args.loss_norm)
+        print(f"[Train] HybridLoss freq_norm={args.loss_norm} | weights: "
+              f"pixel {criterion.w_pixel} freq {criterion.w_freq} "
+              f"ssim {criterion.w_ssim} grad {criterion.w_grad} "
+              f"lpips {criterion.w_lpips}")
     else:
         criterion = CharbonnierLoss().to(device)
 

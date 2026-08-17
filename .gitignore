@@ -1,6 +1,19 @@
+PUSH.md
 git_commands.md
 WHAT_TO_DO.md
 
+# Weights live in models/. Only drunet_sr_inference.pth (67.5 MB) is tracked.
+# drunet_sr_best.pth is the 539.7 MB resumable checkpoint: far over GitHub's
+# 100 MB per-file limit, needed only for --resume, never for inference.
+models/drunet_sr_best.pth
+models/drunet_epoch_*.pth
+models/baseline_*.pth
+
+# Older layout, kept ignored so a stale local model_weights/ cannot be staged.
 model_weights/drunet_sr_best.pth
 model_weights/drunet_epoch_*.pth
+model_weights/baseline_*.pth
+
 .pytest_cache/
+__pycache__/
+*.pyc

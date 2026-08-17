@@ -51,7 +51,7 @@ denoiser-restorer rather than an interpolation-first super-resolver.
 | Schedule | 150 epochs, Adam 2e-4, cosine to 1e-6, EMA decay 0.999 |
 | Wall clock | ~71 s/epoch, ~3.0 h total |
 | Parameters | 33,707,652 |
-| Inference | 0.234 s/image with 8× self-ensemble |
+| Inference | 0.163 s/image with 8× self-ensemble (variants batched) |
 | **Best checkpoint** | **epoch 28** |
 
 ## Known limitation — the loss is mis-scaled
@@ -128,8 +128,10 @@ random, which points at the same under-training cause documented above.
 
 ## Note on the self-ensemble gain
 
-The 8× geometric self-ensemble contributes **+2.822 dB** (rows 3 → 4), well
-outside the +0.1–0.4 dB typically reported. A gain that large indicates the
+The 8× geometric self-ensemble contributes **+2.822 dB** (rows 3 → 4), roughly
+20× the +0.10–0.25 dB reported by EDSR (Lim et al., CVPRW 2017), the paper that
+introduced the technique (EDSR 29.25 → EDSR+ 29.38 dB on DIV2K ×4). A gain that
+large indicates the
 single-pass model produces high-variance, inconsistent outputs that averaging
 suppresses — the test-time augmentation is performing denoising the network
 itself should have learned. The gain is real and reproducible, but it is a

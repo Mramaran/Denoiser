@@ -10,8 +10,8 @@ Usage:
     python evaluate.py --input_dir ./test_images --output_dir ./restored_outputs
 
 The script will:
-1. Auto-detect trained weights for the selected mode in model_weights/
-   (or load the path given by --weights)
+1. Auto-detect trained weights for the selected mode in models/, falling back
+   to model_weights/ (or load the path given by --weights)
 2. For each .npy image in --input_dir, restore it and save the 256x256
    result to --output_dir
 3. Report timing statistics
@@ -19,7 +19,7 @@ The script will:
 Requirements:
     - PyTorch >= 2.0
     - NumPy
-    - Trained model weights in model_weights/ (drunet_sr_inference.pth for
+    - Trained model weights in models/ (drunet_sr_inference.pth for
       e2e mode, drunet_denoiser_best.pth for pnp mode)
 
 Reference:
@@ -48,26 +48,41 @@ from utils.utils_pnp import pnp_hqs_restore
 from utils.utils_image import load_npy, save_npy
 
 
-def find_model_weights(weight_dir="model_weights", mode="e2e"):
-    """Find the best available model weights file for the requested mode."""
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# models/ holds the shipped checkpoint and is where training writes, matching
+# the folder layout the submission brief specifies. model_weights/ is kept as a
+# fallback so a clone using the older layout still runs without an edit.
+WEIGHT_DIRS = ["models", "model_weights"]
+
+
+def find_model_weights(weight_dir=None, mode="e2e"):
+    """Find the best available model weights file for the requested mode.
+
+    weight_dir: a single directory to search, or None to search WEIGHT_DIRS
+    relative to this script.
+    """
+    dirs = ([os.path.join(SCRIPT_DIR, d) for d in WEIGHT_DIRS]
+            if weight_dir is None else [weight_dir])
+
     if mode == "e2e":
         # Prefer the shipped fp16 inference checkpoint; fall back to the
         # local full checkpoint when training on this machine.
-        candidates = [
-            os.path.join(weight_dir, "drunet_sr_inference.pth"),
-            os.path.join(weight_dir, "drunet_sr_best.pth"),
-        ]
+        names = ["drunet_sr_inference.pth", "drunet_sr_best.pth"]
     else:
-        candidates = [
-            os.path.join(weight_dir, "drunet_denoiser_best.pth"),
-            os.path.join(weight_dir, "drunet_denoiser_final.pth"),
-        ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
+        names = ["drunet_denoiser_best.pth", "drunet_denoiser_final.pth"]
 
-    pth_files = glob.glob(os.path.join(weight_dir, "*.pth"))
-    return sorted(pth_files)[-1] if pth_files else None
+    for directory in dirs:
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                return path
+
+    for directory in dirs:
+        pth_files = sorted(glob.glob(os.path.join(directory, "*.pth")))
+        if pth_files:
+            return pth_files[-1]
+    return None
 
 
 def main():
@@ -84,7 +99,7 @@ def main():
     )
     parser.add_argument(
         "--weights", type=str, default=None,
-        help="Path to model weights file (default: auto-detect in model_weights/)"
+        help="Path to model weights file (default: auto-detect in models/)"
     )
     parser.add_argument(
         "--mode", choices=["e2e", "pnp"], default="e2e",
@@ -150,16 +165,13 @@ def main():
     print(f"[Evaluate] Device: {device}")
 
     # Find weights
-    script_dir = os.path.dirname(os.path.abspath(__file__))
     if args.weights:
         weights_path = args.weights
     else:
-        weights_path = find_model_weights(
-            os.path.join(script_dir, "model_weights"), mode=args.mode
-        )
+        weights_path = find_model_weights(mode=args.mode)
 
     if weights_path is None or not os.path.isfile(weights_path):
-        print(f"ERROR: Model weights not found. Expected in model_weights/")
+        print(f"ERROR: Model weights not found. Expected in {' or '.join(WEIGHT_DIRS)}/")
         print(f"       Run train.py first, or provide --weights path")
         sys.exit(1)
 
