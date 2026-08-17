@@ -23,32 +23,38 @@ def calculate_psnr(img1, img2, border=0):
         return float('inf')
     return 10.0 * math.log10(1.0 / mse)
 
-def calculate_ssim(img1, img2, border=0):
-    """Calculate SSIM between two grayscale images.
-    Implements the standard SSIM formula without requiring scikit-image."""
-    # Implement SSIM manually to avoid external dependency issues
-    # Use the standard Wang et al. 2004 formulation
-    # K1=0.01, K2=0.03, L=1.0 (for [0,1] range)
-    # Window: 11x11 uniform (simplified from Gaussian for robustness)
+def calculate_ssim(img1, img2, border=0, data_range=1.0):
+    """Windowed SSIM (Wang et al., 2004): 11x11 Gaussian window, sigma=1.5.
+
+    The previous implementation used a single global mean and variance, which
+    scores a pixel-shuffled image near 1.0 against its own source.
+    """
+    from scipy.ndimage import gaussian_filter
+
     if border > 0:
         img1 = img1[border:-border, border:-border]
         img2 = img2[border:-border, border:-border]
-    
-    C1 = (0.01) ** 2
-    C2 = (0.03) ** 2
-    
+
     img1 = img1.astype(np.float64)
     img2 = img2.astype(np.float64)
-    
-    mu1 = np.mean(img1)
-    mu2 = np.mean(img2)
-    sigma1_sq = np.var(img1)
-    sigma2_sq = np.var(img2)
-    sigma12 = np.mean((img1 - mu1) * (img2 - mu2))
-    
-    ssim = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
-           ((mu1**2 + mu2**2 + C1) * (sigma1_sq + sigma2_sq + C2))
-    return ssim
+
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+
+    # sigma=1.5 with truncate=3.5 gives radius 5, i.e. the standard 11x11 window
+    def filt(x):
+        return gaussian_filter(x, sigma=1.5, truncate=3.5, mode="nearest")
+
+    mu1, mu2 = filt(img1), filt(img2)
+    mu1_sq, mu2_sq, mu1_mu2 = mu1 * mu1, mu2 * mu2, mu1 * mu2
+
+    sigma1_sq = filt(img1 * img1) - mu1_sq
+    sigma2_sq = filt(img2 * img2) - mu2_sq
+    sigma12 = filt(img1 * img2) - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return float(ssim_map.mean())
 
 def augment_img(img, mode=0):
     """Data augmentation: 8 possible flips/rotations for a 2D image."""
