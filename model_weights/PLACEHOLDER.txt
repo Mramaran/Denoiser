@@ -1,2 +1,0 @@
-Place your trained model weights here (e.g., model.pt, model.onnx).
-If files are large, add them via Git LFS or provide an external download link (Google Drive / HuggingFace) and document it in the README.
