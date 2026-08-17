@@ -60,45 +60,44 @@ def upsample_transpose(img_tensor, scale_factor=2, target_size=None):
     return out
 
 
-def data_fidelity_sr(y, z_k, mu, scale_factor=2):
-    """Autograd-based exact data fidelity step for super-resolution.
-    
+def data_fidelity_sr(y, z_k, mu, scale_factor=2, num_steps=30):
+    """Data-fidelity step for super-resolution.
+
     Solves: x_{k+1} = argmin_x (1/(2*mu)) * ||y - Dx||^2 + (1/2) * ||x - z_k||^2
-    
-    This uses PyTorch's Autograd (Adam optimizer) to dynamically solve the 
-    equation. This guarantees the physics perfectly align with standard 
-    bicubic downsampling without complex mathematical artifacts.
-    
+
+    This is a strictly convex quadratic with Hessian D^T D / mu + I. For 2x
+    area-style downsampling ||D||^2 <= 1/scale_factor^2, so the Lipschitz
+    constant is bounded by L = 1/(scale_factor^2 * mu) + 1, and gradient
+    descent is stable for any step below 2/L. We use the optimal 1/L.
+
+    The previous implementation used a fixed lr=0.2, which exceeds 2/L for
+    mu < ~0.028 and therefore diverged on the first three iterations of the
+    default mu schedule (max|x| reached 1.3e4 from inputs of std 0.1).
+
     Args:
         y: observed LR image (B, C, H_lr, W_lr)
-        z_k: current estimate from denoiser (B, C, H_hr, W_hr)  
+        z_k: current estimate from the denoiser (B, C, H_hr, W_hr)
         mu: penalty parameter (float)
         scale_factor: downsampling factor
+        num_steps: gradient-descent iterations
     Returns:
         x_{k+1}: updated estimate (B, C, H_hr, W_hr)
     """
-    # Clone and enable gradients
+    lipschitz = 1.0 / (scale_factor ** 2 * mu) + 1.0
+    lr = 1.0 / lipschitz
+
     with torch.enable_grad():
         x = z_k.clone().requires_grad_(True)
-        
-        # Use SGD optimizer with a smaller learning rate (0.2) to prevent high-frequency gradient injection
-        optimizer = torch.optim.SGD([x], lr=0.2)
-        
-        # 10 iterations is usually enough for this convex quadratic subproblem
-        for _ in range(10):
+        optimizer = torch.optim.SGD([x], lr=lr)
+
+        for _ in range(num_steps):
             optimizer.zero_grad()
-            
-            # Exact standard bicubic degradation (with antialiasing)
-            Dx = F.interpolate(x, scale_factor=1.0/scale_factor, mode='bicubic', align_corners=False, antialias=True)
-            
-            # Exact HQS Energy formulation
-            loss_data = torch.sum((y - Dx)**2) / (2 * mu)
-            loss_prior = torch.sum((x - z_k)**2) / 2
-            loss = loss_data + loss_prior
-            
+            Dx = F.interpolate(x, scale_factor=1.0 / scale_factor, mode='bicubic',
+                               align_corners=False, antialias=True)
+            loss = torch.sum((y - Dx) ** 2) / (2 * mu) + torch.sum((x - z_k) ** 2) / 2
             loss.backward()
             optimizer.step()
-            
+
         return x.detach()
 
 
